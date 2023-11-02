@@ -1,0 +1,48 @@
+import polars as pl
+import requests
+
+from io import BytesIO
+from datetime import datetime
+from zipfile import ZipFile
+
+base_url = "http://nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/{year:04d}/MMSDM_{year:04d}_{month:02d}/MMSDM_Historical_Data_SQLLoader/DATA/PUBLIC_DVD_DISPATCHREGIONSUM_{year:04d}{month:02d}010000.zip"
+start = datetime(2022, 1, 1)
+end = datetime(2023, 1, 1)
+dfs = []
+
+for dt in pl.date_range(start, end, "1mo", eager=True):
+    response = requests.get(base_url.format(year=dt.year, month=dt.month))
+
+    drop_columns = {"I", "DISPATCH", "REGIONSUM", "5", "RUNNO"}
+    string_columns = {"I", "DISPATCH", "REGIONSUM", "REGIONID"}
+    datetime_columns = {"SETTLEMENTDATE", "LASTCHANGED"}
+    integer_columns = {"INTERVENTION"}
+
+    data = BytesIO(response.content)
+
+    with ZipFile(data) as z:
+        columns = set(
+            pl.read_csv(
+                z.open(str(z.filelist[0].filename)), n_rows=2, skip_rows=1
+            ).columns
+        )
+        dtypes = {
+            **{col: pl.Float32 for col in columns - drop_columns - datetime_columns},
+            **{col: pl.Datetime for col in datetime_columns},
+            **{col: pl.Utf8 for col in string_columns},
+            **{col: pl.Int64 for col in integer_columns},
+        }
+        dfs.append(
+            pl.concat(
+                [
+                    pl.read_csv(
+                        z.open(file.filename), skip_rows=1, dtypes=dtypes
+                    ).lazy()
+                    for file in z.filelist
+                ]
+            )
+            .drop_nulls(subset=["SETTLEMENTDATE", "REGIONID"])
+            .drop(columns=list(drop_columns))
+        )
+
+df = pl.concat(dfs).filter(pl.col("SETTLEMENTDATE").is_between(start, end)).collect()
